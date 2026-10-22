@@ -1,0 +1,53 @@
+name: Notify Arpith world on push
+
+# Posts a review request to the "Arpith world" Google Chat space after every push.
+# Needs the space's incoming-webhook URL in the GOOGLE_CHAT_WEBHOOK repo secret.
+
+on: push
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Post to Google Chat
+        env:
+          WEBHOOK: ${{ secrets.GOOGLE_CHAT_WEBHOOK }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "GOOGLE_CHAT_WEBHOOK secret is not set; skipping."
+            exit 0
+          fi
+
+          # New branch or force-push: fall back to comparing against main.
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            BEFORE=$(git merge-base "$AFTER" origin/main)
+          fi
+
+          count=$(git rev-list --count "$BEFORE..$AFTER")
+          if [ "$count" -eq 0 ]; then
+            echo "No new commits; skipping."
+            exit 0
+          fi
+          if [ "$count" -eq 1 ]; then
+            link="$REPO_URL/commit/$AFTER"
+          else
+            link="$REPO_URL/compare/${BEFORE:0:12}...${AFTER:0:12}"
+          fi
+
+          stats=$(git diff --shortstat "$BEFORE" "$AFTER" | sed 's/^ //')
+          files=$(git diff --numstat "$BEFORE" "$AFTER" | awk '{printf "• %s (+%s -%s)\n", $3, $1, $2}')
+          commits=$(git log --format='• %h %s — %an' "$BEFORE..$AFTER")
+
+          text=$(printf 'Hi Arpith, can you please check the changes I just pushed to `%s`?\n%s\n\n*Summary:* %s commit(s), %s\n\n*Files:*\n%s\n\n*Commits:*\n%s' \
+            "$BRANCH" "$link" "$count" "$stats" "$files" "$commits")
+
+          jq -n --arg text "$text" '{text: $text}' |
+            curl -fsS -X POST -H 'Content-Type: application/json; charset=UTF-8' --data @- "$WEBHOOK"
